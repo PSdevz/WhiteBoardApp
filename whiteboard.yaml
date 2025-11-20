@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whiteboard-app
+spec:
+  replicas: 2  # Satisfies "at least two nodes" requirement
+  selector:
+    matchLabels:
+      app: whiteboard
+  template:
+    metadata:
+      labels:
+        app: whiteboard
+    spec:
+      containers:
+        - name: whiteboard
+          # IMPORTANT: Replace 'youruser' with your actual Docker Hub username
+          image: youruser/whiteboard-app:v1
+          ports:
+            - containerPort: 5001
+          env:
+            - name: REDIS_HOST
+              value: "redis-server" # Connects to your Redis service
+          # Quality of Service (QoS) limits
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whiteboard-service
+spec:
+  type: NodePort
+  ports:
+    - port: 5001
+      targetPort: 5001
+      # nodePort: 30001 # Optional: Uncomment to force a specific port
+  selector:
+    app: whiteboard
