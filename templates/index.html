@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Whiteboard</title>
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+            background: #fff;
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: crosshair;
+        }
+    </style>
+</head>
+<body>
+<canvas id="board"></canvas>
+
+<script>
+    // --- ADD THESE 5 LINES TO FIX IT ---
+    const canvas = document.getElementById('board');
+    const ctx = canvas.getContext('2d');
+    const socket = io(); // Connects to the server that served the page
+
+    // Set the drawing area size to match the window
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    // ------------------------------------
+
+    let drawing = false;
+    let lastX = 0, lastY = 0;
+
+    canvas.addEventListener('mousedown', e => {
+        drawing = true;
+        lastX = e.clientX;
+        lastY = e.clientY;
+    });
+
+    canvas.addEventListener('mouseup', () => drawing = false);
+    canvas.addEventListener('mousemove', draw);
+
+    function draw(event) {
+        if (!drawing) return;
+
+        const x = event.clientX;
+        const y = event.clientY;
+
+        // Draw a line from the previous point to the current one
+        ctx.beginPath();
+        ctx.moveTo(lastX, lastY);
+        ctx.lineTo(x, y);
+        ctx.strokeStyle = 'black'; // You can change this
+        ctx.lineWidth = 2;         // You can change this
+        ctx.stroke();
+
+        // Update last position for the next move
+        lastX = x;
+        lastY = y;
+
+        // Send the drawing data to the server
+        socket.emit('draw', { x, y, lastX, lastY });
+    }
+
+    // Listen for remote draws from other users
+    socket.on('draw', data => {
+        ctx.beginPath();
+        ctx.moveTo(data.lastX, data.lastY);
+        ctx.lineTo(data.x, data.y);
+        ctx.strokeStyle = 'black';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    });
+</script>
+</body>
+</html>
