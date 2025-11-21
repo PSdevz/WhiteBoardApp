@@ -10,7 +10,7 @@ WORKDIR /app
 # This is an optimization. Docker caches this step, so if you
 # only change your app code, the build is much faster.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements
 
 # Step 4: Copy the rest of your app code into the /app directory
 # This copies app.py, the Dockerfile, etc.
