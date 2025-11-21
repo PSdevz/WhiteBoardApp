@@ -23,4 +23,4 @@ EXPOSE 5001
 
 # Step 6: The command to run your app when the container starts.
 # We use the eventlet server for production.
-CMD ["python", "app.py"]
+CMD ["python", "-u", "app.py"]
