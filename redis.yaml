@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: redis:alpine  # A small, fast Redis image
+          image: redis:alpine
           ports:
             - containerPort: 6379
 
@@ -22,12 +22,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  # This name is CRITICAL. It must match the 'redis_host'
-  # in your app.py so Kubernetes can find it.
-  name: redis-server
+  name: redis-server   # must match what your app uses as redis_host
 spec:
+  type: NodePort       # or LoadBalancer if you’re on cloud
   ports:
     - port: 6379
       targetPort: 6379
+      nodePort: 32005  # optional: fix the external port if you want consistency
   selector:
     app: redis
