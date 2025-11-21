@@ -24,15 +24,34 @@
 <canvas id="board"></canvas>
 
 <script>
-    // --- ADD THESE 5 LINES TO FIX IT ---
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
-    const socket = io(); // Connects to the server that served the page
+
+    // --- THE FIX FOR YOUR CONNECTION ERROR ---
+    // We explicitly tell Socket.IO to use the current URL and try websockets first.
+    const socket = io(window.location.origin, {
+        transports: ["websocket", "polling"]
+    });
+
+    // Debugging: Verify connection in the console
+    socket.on("connect", () => {
+        console.log("✅ Successfully connected to server! ID:", socket.id);
+    });
+
+    socket.on("connect_error", (err) => {
+        console.error("❌ Connection failed:", err);
+    });
+    // -----------------------------------------
 
     // Set the drawing area size to match the window
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
-    // ------------------------------------
+
+    // Handle window resizing
+    window.addEventListener('resize', () => {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    });
 
     let drawing = false;
     let lastX = 0, lastY = 0;
@@ -52,23 +71,24 @@
         const x = event.clientX;
         const y = event.clientY;
 
-        // Draw a line from the previous point to the current one
+        // Draw locally
         ctx.beginPath();
         ctx.moveTo(lastX, lastY);
         ctx.lineTo(x, y);
-        ctx.strokeStyle = 'black'; // You can change this
-        ctx.lineWidth = 2;         // You can change this
+        ctx.strokeStyle = 'black';
+        ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Update last position for the next move
+        // Update last position
+        const data = { x, y, lastX, lastY };
         lastX = x;
         lastY = y;
 
-        // Send the drawing data to the server
-        socket.emit('draw', { x, y, lastX, lastY });
+        // Send to server
+        socket.emit('draw', data);
     }
 
-    // Listen for remote draws from other users
+    // Listen for remote draws
     socket.on('draw', data => {
         ctx.beginPath();
         ctx.moveTo(data.lastX, data.lastY);
