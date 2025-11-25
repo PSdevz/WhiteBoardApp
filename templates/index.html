@@ -27,23 +27,20 @@
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
 
-    // --- THE FIX FOR YOUR CONNECTION ERROR ---
-    // We explicitly tell Socket.IO to use the current URL and try websockets first.
+    // Connect to Socket.IO server
     const socket = io(window.location.origin, {
         transports: ["websocket", "polling"]
     });
 
-    // Debugging: Verify connection in the console
+    // Debugging connection
     socket.on("connect", () => {
-        console.log("✅ Successfully connected to server! ID:", socket.id);
+        console.log("✅ Connected to server! ID:", socket.id);
     });
-
     socket.on("connect_error", (err) => {
         console.error("❌ Connection failed:", err);
     });
-    // -----------------------------------------
 
-    // Set the drawing area size to match the window
+    // Set canvas size
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
@@ -79,7 +76,7 @@
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Update last position
+        // Prepare data
         const data = { x, y, lastX, lastY };
         lastX = x;
         lastY = y;
@@ -96,6 +93,19 @@
         ctx.strokeStyle = 'black';
         ctx.lineWidth = 2;
         ctx.stroke();
+    });
+
+    // Listen for sync_state (full history on connect)
+    socket.on('sync_state', state => {
+        console.log("📥 Received sync state:", state);
+        state.forEach(data => {
+            ctx.beginPath();
+            ctx.moveTo(data.lastX, data.lastY);
+            ctx.lineTo(data.x, data.y);
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        });
     });
 </script>
 </body>
