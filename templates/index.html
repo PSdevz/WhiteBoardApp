@@ -18,7 +18,6 @@
             height: 100vh;
             cursor: crosshair;
         }
-        /* Clear button styling */
         #clearBtn {
             position: absolute;
             top: 10px;
@@ -37,11 +36,9 @@
 <script>
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
-
-    // Local copy of all draw actions
     let currentState = [];
 
-    // Set canvas size
+    // Set and resize canvas
     function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
@@ -53,11 +50,7 @@
     // Connect to Socket.IO server
     const socket = io(window.location.origin, { transports: ["websocket", "polling"] });
 
-    // Debugging connection
-    socket.on("connect", () => console.log("✅ Connected to server! ID:", socket.id));
-    socket.on("connect_error", (err) => console.error("❌ Connection failed:", err));
-
-    // Redraw all saved drawing actions
+    // Redraw all drawing actions
     function redrawState() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         currentState.forEach(data => {
@@ -70,7 +63,7 @@
         });
     }
 
-    // --- Drawing logic ---
+    // Drawing logic
     let drawing = false;
     let lastX = 0, lastY = 0;
 
@@ -81,7 +74,7 @@
     });
 
     canvas.addEventListener('mouseup', () => drawing = false);
-    canvas.addEventListener('mouseout', () => drawing = false); // stops drawing when cursor leaves canvas
+    canvas.addEventListener('mouseout', () => drawing = false);
     canvas.addEventListener('mousemove', draw);
 
     function draw(event) {
@@ -91,10 +84,8 @@
         const y = event.clientY;
         const data = { x, y, lastX, lastY };
 
-        // Save locally
         currentState.push(data);
 
-        // Draw locally
         ctx.beginPath();
         ctx.moveTo(lastX, lastY);
         ctx.lineTo(x, y);
@@ -105,23 +96,19 @@
         lastX = x;
         lastY = y;
 
-        // Send to server
         socket.emit('draw', data);
     }
 
-    // --- Clear All button logic ---
+    // Clear All button
     const clearBtn = document.getElementById('clearBtn');
     clearBtn.addEventListener('click', () => {
-        // Clear local state and canvas
         currentState = [];
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        // Notify server to clear all clients
         socket.emit('clear_all');
     });
 
-    // --- Socket.IO listeners ---
+    // Socket.IO listeners
     socket.on('draw', data => {
-        // Save and draw remote actions
         currentState.push(data);
         ctx.beginPath();
         ctx.moveTo(data.lastX, data.lastY);
@@ -132,13 +119,11 @@
     });
 
     socket.on('sync_state', state => {
-        // Replace local state and redraw everything
         currentState = state;
         redrawState();
     });
 
     socket.on('clear_all', () => {
-        // Clear local state and canvas on receiving clear_all event
         currentState = [];
         ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
