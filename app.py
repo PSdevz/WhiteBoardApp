@@ -12,12 +12,13 @@ app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
 # --- Redis Setup ---
 redis_host = os.environ.get('REDIS_HOST', 'localhost')
+redis_port = int(os.environ.get('REDIS_PORT', 6379))
 try:
-    r = redis.StrictRedis(host=redis_host, port=6379, decode_responses=True)
+    r = redis.StrictRedis(host=redis_host, port=redis_port, decode_responses=True)
     r.ping()
     print("Connected to Redis successfully!")
 except Exception as e:
-    print(f"COULD NOT CONNECT TO REDIS at {redis_host}: {e}")
+    print(f"COULD NOT CONNECT TO REDIS at {redis_host}:{redis_port}: {e}")
     r = None
 
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -28,7 +29,6 @@ STATE_KEY = "whiteboard_state"
 def save_state(data):
     if r:
         try:
-            # Append each draw action to a list
             r.rpush(STATE_KEY, json.dumps(data))
         except Exception as e:
             print(f"Redis save_state error: {e}")
@@ -36,7 +36,6 @@ def save_state(data):
 def load_state():
     if r:
         try:
-            # Load the full list of draw actions
             return [json.loads(x) for x in r.lrange(STATE_KEY, 0, -1)]
         except Exception as e:
             print(f"Redis load_state error: {e}")
@@ -50,7 +49,6 @@ def index():
 # --- SocketIO Handlers ---
 @socketio.on('connect')
 def handle_connect():
-    # Send the full state to new clients
     state = load_state()
     if state:
         emit('sync_state', state)
@@ -59,11 +57,14 @@ def handle_connect():
 def handle_draw(data):
     # Broadcast locally
     emit('draw', data, broadcast=True)
-    # Publish to Redis and save state
     if r:
         try:
             r.publish('whiteboard_channel', json.dumps(data))
-            save_state(data)
+            # Handle clear action
+            if data.get('action') == 'clear':
+                r.delete(STATE_KEY)  # clear saved state
+            else:
+                save_state(data)
         except Exception as e:
             print(f"Redis publish error: {e}")
 
