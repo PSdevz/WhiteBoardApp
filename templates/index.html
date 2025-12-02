@@ -37,31 +37,40 @@
 <script>
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
-    const clearBtn = document.getElementById('clearBtn');
 
-    // Connect to Socket.IO server
-    const socket = io(window.location.origin, {
-        transports: ["websocket", "polling"]
-    });
-
-    // Debugging connection
-    socket.on("connect", () => {
-        console.log("✅ Connected to server! ID:", socket.id);
-    });
-    socket.on("connect_error", (err) => {
-        console.error("❌ Connection failed:", err);
-    });
+    // Local copy of all draw actions
+    let currentState = [];
 
     // Set canvas size
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-
-    // Handle window resizing
-    window.addEventListener('resize', () => {
+    function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
-    });
+        redrawState();
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
 
+    // Connect to Socket.IO server
+    const socket = io(window.location.origin, { transports: ["websocket", "polling"] });
+
+    // Debugging connection
+    socket.on("connect", () => console.log("✅ Connected to server! ID:", socket.id));
+    socket.on("connect_error", (err) => console.error("❌ Connection failed:", err));
+
+    // Redraw all saved drawing actions
+    function redrawState() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        currentState.forEach(data => {
+            ctx.beginPath();
+            ctx.moveTo(data.lastX, data.lastY);
+            ctx.lineTo(data.x, data.y);
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        });
+    }
+
+    // --- Drawing logic ---
     let drawing = false;
     let lastX = 0, lastY = 0;
 
@@ -70,7 +79,9 @@
         lastX = e.clientX;
         lastY = e.clientY;
     });
+
     canvas.addEventListener('mouseup', () => drawing = false);
+    canvas.addEventListener('mouseout', () => drawing = false); // stops drawing when cursor leaves canvas
     canvas.addEventListener('mousemove', draw);
 
     function draw(event) {
@@ -78,6 +89,10 @@
 
         const x = event.clientX;
         const y = event.clientY;
+        const data = { x, y, lastX, lastY };
+
+        // Save locally
+        currentState.push(data);
 
         // Draw locally
         ctx.beginPath();
@@ -87,8 +102,6 @@
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Prepare data
-        const data = { x, y, lastX, lastY, action: 'draw' };
         lastX = x;
         lastY = y;
 
@@ -96,25 +109,10 @@
         socket.emit('draw', data);
     }
 
-    // Clear canvas function
-    function clearCanvas() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-
-    // Handle Clear All button click
-    clearBtn.addEventListener('click', () => {
-        // Clear locally
-        clearCanvas();
-        // Send clear event to server
-        socket.emit('draw', { action: 'clear' });
-    });
-
-    // Listen for remote draws and clear events
+    // --- Socket.IO listeners ---
     socket.on('draw', data => {
-        if (data.action === 'clear') {
-            clearCanvas();
-            return;
-        }
+        // Save and draw remote actions
+        currentState.push(data);
         ctx.beginPath();
         ctx.moveTo(data.lastX, data.lastY);
         ctx.lineTo(data.x, data.y);
@@ -123,21 +121,10 @@
         ctx.stroke();
     });
 
-    // Listen for sync_state (full history on connect)
     socket.on('sync_state', state => {
-        console.log("📥 Received sync state:", state);
-        state.forEach(data => {
-            if (data.action === 'clear') {
-                clearCanvas();
-            } else {
-                ctx.beginPath();
-                ctx.moveTo(data.lastX, data.lastY);
-                ctx.lineTo(data.x, data.y);
-                ctx.strokeStyle = 'black';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-            }
-        });
+        // Replace local state and redraw everything
+        currentState = state;
+        redrawState();
     });
 </script>
 </body>
