@@ -109,6 +109,16 @@
         socket.emit('draw', data);
     }
 
+    // --- Clear All button logic ---
+    const clearBtn = document.getElementById('clearBtn');
+    clearBtn.addEventListener('click', () => {
+        // Clear local state and canvas
+        currentState = [];
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // Notify server to clear all clients
+        socket.emit('clear_all');
+    });
+
     // --- Socket.IO listeners ---
     socket.on('draw', data => {
         // Save and draw remote actions
@@ -125,6 +135,12 @@
         // Replace local state and redraw everything
         currentState = state;
         redrawState();
+    });
+
+    socket.on('clear_all', () => {
+        // Clear local state and canvas on receiving clear_all event
+        currentState = [];
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
     });
 </script>
 </body>
