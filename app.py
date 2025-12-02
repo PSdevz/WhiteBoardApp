@@ -68,6 +68,17 @@ def handle_draw(data):
         except Exception as e:
             print(f"Redis publish error: {e}")
 
+@socketio.on('clear_all')
+def handle_clear_all():
+    if r:
+        try:
+            r.delete(STATE_KEY)  # clear saved state
+            clear_msg = json.dumps({'action': 'clear_all'})
+            r.publish('whiteboard_channel', clear_msg)
+            emit('clear_all', broadcast=True)
+        except Exception as e:
+            print(f"Redis clear_all error: {e}")
+
 # --- Redis Listener ---
 def redis_listener():
     if not r:
@@ -79,7 +90,10 @@ def redis_listener():
     for msg in pubsub.listen():
         if msg['type'] == 'message':
             data = json.loads(msg['data'])
-            socketio.emit('draw', data)
+            if data.get('action') == 'clear_all':
+                socketio.emit('clear_all')
+            else:
+                socketio.emit('draw', data)
 
 # --- Start App ---
 if __name__ == "__main__":
