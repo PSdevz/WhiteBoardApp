@@ -18,14 +18,26 @@
             height: 100vh;
             cursor: crosshair;
         }
+        /* Clear button styling */
+        #clearBtn {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            padding: 8px 12px;
+            font-size: 14px;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
+<button id="clearBtn">Clear All</button>
 <canvas id="board"></canvas>
 
 <script>
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
+    const clearBtn = document.getElementById('clearBtn');
 
     // Connect to Socket.IO server
     const socket = io(window.location.origin, {
@@ -58,7 +70,6 @@
         lastX = e.clientX;
         lastY = e.clientY;
     });
-
     canvas.addEventListener('mouseup', () => drawing = false);
     canvas.addEventListener('mousemove', draw);
 
@@ -77,7 +88,7 @@
         ctx.stroke();
 
         // Prepare data
-        const data = { x, y, lastX, lastY };
+        const data = { x, y, lastX, lastY, action: 'draw' };
         lastX = x;
         lastY = y;
 
@@ -85,8 +96,25 @@
         socket.emit('draw', data);
     }
 
-    // Listen for remote draws
+    // Clear canvas function
+    function clearCanvas() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Handle Clear All button click
+    clearBtn.addEventListener('click', () => {
+        // Clear locally
+        clearCanvas();
+        // Send clear event to server
+        socket.emit('draw', { action: 'clear' });
+    });
+
+    // Listen for remote draws and clear events
     socket.on('draw', data => {
+        if (data.action === 'clear') {
+            clearCanvas();
+            return;
+        }
         ctx.beginPath();
         ctx.moveTo(data.lastX, data.lastY);
         ctx.lineTo(data.x, data.y);
@@ -99,12 +127,16 @@
     socket.on('sync_state', state => {
         console.log("📥 Received sync state:", state);
         state.forEach(data => {
-            ctx.beginPath();
-            ctx.moveTo(data.lastX, data.lastY);
-            ctx.lineTo(data.x, data.y);
-            ctx.strokeStyle = 'black';
-            ctx.lineWidth = 2;
-            ctx.stroke();
+            if (data.action === 'clear') {
+                clearCanvas();
+            } else {
+                ctx.beginPath();
+                ctx.moveTo(data.lastX, data.lastY);
+                ctx.lineTo(data.x, data.y);
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
         });
     });
 </script>
