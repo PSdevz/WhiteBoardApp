@@ -5,7 +5,9 @@
     <title>Whiteboard</title>
     <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
     <style>
-        /* ... (CSS remains the same) ... */
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #clearBtn { position: fixed; top: 10px; left: 10px; z-index: 1000; }
     </style>
 </head>
 <body>
@@ -16,16 +18,15 @@
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
     let currentState = [];
+    let segmentSet = new Set(); // To prevent duplicates
 
     // --- Utility Functions ---
-
-    // Clears the canvas and local state array
     function clearCanvas() {
         currentState = [];
+        segmentSet.clear();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
 
-    // Sets canvas size and re-renders the current state
     function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
@@ -34,11 +35,8 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // Redraw all drawing actions from the currentState array
     function redrawState() {
-        // CRITICAL CHANGE: Clear the canvas immediately before drawing the state
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-
         currentState.forEach(data => {
             ctx.beginPath();
             ctx.moveTo(data.lastX, data.lastY);
@@ -50,9 +48,9 @@
     }
 
     // --- Socket.IO Setup ---
-    const socket = io(window.location.origin, { transports: ["websocket", "polling"] });
+    const socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
 
-    // --- Drawing Logic (Same) ---
+    // --- Drawing Logic ---
     let drawing = false;
     let lastX = 0, lastY = 0;
 
@@ -61,19 +59,20 @@
         lastX = e.clientX;
         lastY = e.clientY;
     });
-
     canvas.addEventListener('mouseup', () => drawing = false);
     canvas.addEventListener('mouseout', () => drawing = false);
     canvas.addEventListener('mousemove', draw);
 
     function draw(event) {
         if (!drawing) return;
-
         const x = event.clientX;
         const y = event.clientY;
-        const data = { x, y, lastX, lastY };
+        const key = `${lastX},${lastY},${x},${y}`;
+        if (segmentSet.has(key)) return;
 
+        const data = { x, y, lastX, lastY };
         currentState.push(data);
+        segmentSet.add(key);
 
         ctx.beginPath();
         ctx.moveTo(lastX, lastY);
@@ -88,24 +87,25 @@
         socket.emit('draw', data);
     }
 
-    // Clear All button (Same)
+    // Clear All button
     const clearBtn = document.getElementById('clearBtn');
     clearBtn.addEventListener('click', () => {
         clearCanvas();
         socket.emit('clear_all');
     });
 
-    // --- Socket.IO Listeners (Updated) ---
-
-    // Handler for successful connection
+    // --- Socket.IO Listeners ---
     socket.on('connect', () => {
-        console.log('Connected to server. Ready to receive state sync.');
-        // ❌ REMOVED: clearCanvas() is no longer called here.
+        console.log('Connected to server');
+        socket.emit('request_sync');
     });
 
-    // Handler for incoming draw events (Same)
     socket.on('draw', data => {
+        const key = `${data.lastX},${data.lastY},${data.x},${data.y}`;
+        if (segmentSet.has(key)) return;
         currentState.push(data);
+        segmentSet.add(key);
+
         ctx.beginPath();
         ctx.moveTo(data.lastX, data.lastY);
         ctx.lineTo(data.x, data.y);
@@ -114,26 +114,27 @@
         ctx.stroke();
     });
 
-    // Handler for initial state synchronization (sent upon 'connect')
+    socket.on('clear_all', () => {
+        clearCanvas();
+        console.log('Board cleared by another client');
+    });
+
     socket.on('sync_state', state => {
-        // ✅ CRITICAL FIX: The clearing logic is now integrated into redrawState()
-        // which runs when we actually have the data.
-        console.log(`Received initial state sync with ${state.length} segments.`);
-        currentState = state;
+        console.log(`Received state with ${state.length} items`);
+        clearCanvas();
+        state.forEach(data => {
+            const key = `${data.lastX},${data.lastY},${data.x},${data.y}`;
+            if (!segmentSet.has(key)) {
+                currentState.push(data);
+                segmentSet.add(key);
+            }
+        });
         redrawState();
     });
 
-    // Handler for full board clear (Same)
-    socket.on('clear_all', () => {
-        clearCanvas();
-        console.log('Board cleared by another client/server event.');
-    });
-
-    // Handler for Server Failover/Failback Notification (Same)
     socket.on('force_sync', () => {
-        console.log('--- 🚨 SERVER FAILOVER DETECTED: Forcing full state refresh ---');
-        socket.disconnect();
-        socket.connect();
+        console.log('Force sync triggered');
+        socket.emit('request_sync');
     });
 </script>
 </body>

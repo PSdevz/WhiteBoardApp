@@ -188,6 +188,12 @@ def handle_clear_all():
     safe_redis_command('publish', 'whiteboard_channel', clear_msg)
     emit('clear_all', broadcast=True)
 
+@socketio.on('request_sync')
+def handle_request_sync():
+    state = load_state()
+    if state:
+        emit('sync_state', state)
+
 # ----------------------------------------------------------------------
 # --- Updated Redis Listener (Handles reconnection, sync, and client notification) ---
 # ----------------------------------------------------------------------
