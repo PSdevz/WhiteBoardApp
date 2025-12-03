@@ -39,33 +39,53 @@ except Exception as e:
 if not r_master and not r_backup:
     print("❌ No Redis server available — running without Redis.")
 
-# Use master as primary client reference
+# Use master as primary client reference if available, else backup
 r = r_master if r_master else r_backup
 
 def safe_redis_command(command, *args, **kwargs):
     """
     Attempt to run a Redis command on master first.
     On failure, switch to backup and retry once.
+    Also attempts automatic fail-back to master if it becomes available.
     """
     global r, r_master, r_backup
+
     if not r_master and not r_backup:
         # No redis available
         return None
+
+    # Attempt automatic fail-back to master if currently not using master
+    if r_master and r != r_master:
+        try:
+            # Test master connection
+            r_master.ping()
+            r = r_master
+            # print("Switched back to MASTER Redis")
+        except Exception:
+            # Master still unavailable, continue using current client
+            pass
+
     clients = []
-    if r_master:
+    # Attempt command on the current primary client first
+    if r:
+        clients.append(r)
+    # Add the other client if different
+    if r_master and r_master != r:
         clients.append(r_master)
-    if r_backup:
+    if r_backup and r_backup != r and r_backup not in clients:
         clients.append(r_backup)
+
     for client in clients:
         try:
             result = getattr(client, command)(*args, **kwargs)
-            # If current client is not 'r', update global 'r' to this client
+            # Update global 'r' to this client if different
             if r != client:
                 r = client
             return result
         except Exception as e:
             # print(f"Redis {command} error on {client}: {e}")
             continue
+
     # If all attempts failed
     print(f"Redis {command} command failed on both master and backup.")
     return None
