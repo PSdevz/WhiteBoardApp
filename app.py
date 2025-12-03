@@ -10,13 +10,17 @@ import os
 import time
 
 app = Flask(__name__)
+# IMPORTANT: change in production
 app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
-# --- Redis Setup (Master → Backup Failover) ---
-MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
-BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
-REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+# --- Redis hosts (env variables) ---
+MASTER_HOST = os.environ.get('REDIS_MASTER', '192.168.64.5')
+BACKUP_HOST = os.environ.get('REDIS_BACKUP', '192.168.64.16')
+REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
+STATE_KEY = 'whiteboard_state'
+CHANNEL = 'whiteboard_channel'
 
+# Helper to create a Redis client and test connectivity
 def connect_redis(host):
     try:
         client = redis.StrictRedis(host=host, port=REDIS_PORT, decode_responses=True)
@@ -25,65 +29,136 @@ def connect_redis(host):
     except Exception:
         return None
 
+# Try initial connections
 r_master = connect_redis(MASTER_HOST)
 r_backup = connect_redis(BACKUP_HOST)
 
+# active client reference
 if r_master:
-    print(f"Connected to MASTER Redis at {MASTER_HOST}")
+    print(f'Connected to MASTER Redis at {MASTER_HOST}')
     r = r_master
 elif r_backup:
-    print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
+    print(f'Connected to BACKUP Redis at {BACKUP_HOST}')
     r = r_backup
 else:
-    print("❌ No Redis server available — running without Redis")
+    print('❌ No Redis server available — running without Redis')
     r = None
 
-socketio = SocketIO(app, cors_allowed_origins="*")
-STATE_KEY = "whiteboard_state"
+socketio = SocketIO(app, cors_allowed_origins='*')
 
-# --- Merge state from old Redis to new Redis on failover/failback ---
-def merge_state(old_client, new_client, state_key=STATE_KEY):
+# -----------------------------
+# State utilities
+# -----------------------------
+
+def list_len(client, key):
     try:
-        old_state = old_client.lrange(state_key, 0, -1)
-        if not old_state:
-            return
-        new_state = new_client.lrange(state_key, 0, -1) or []
-        missing_items = [item for item in old_state if item not in new_state]
-        if missing_items:
-            new_client.rpush(state_key, *missing_items)
-            print(f"✅ Merged {len(missing_items)} items from old Redis to new Redis.")
-    except Exception as e:
-        print(f"⚠️ Error merging state: {e}")
+        return int(client.llen(key))
+    except Exception:
+        return 0
 
-# --- Safe Redis command wrapper ---
+
+def copy_full_state(src_client, dst_client, key=STATE_KEY):
+    """Copy full list state from src -> dst (replace dst contents)."""
+    try:
+        state = src_client.lrange(key, 0, -1)
+        if state is None:
+            return 0
+        pipe = dst_client.pipeline()
+        pipe.delete(key)
+        if state:
+            pipe.rpush(key, *state)
+        pipe.execute()
+        return len(state or [])
+    except Exception as e:
+        print('Error copying state:', e)
+        return 0
+
+
+def merge_missing(src_client, dst_client, key=STATE_KEY):
+    """Append missing items from src to dst (avoid wholesale replace)."""
+    try:
+        src = src_client.lrange(key, 0, -1) or []
+        dst = set(dst_client.lrange(key, 0, -1) or [])
+        missing = [item for item in src if item not in dst]
+        if missing:
+            dst_client.rpush(key, *missing)
+        return len(missing)
+    except Exception as e:
+        print('Error merging state:', e)
+        return 0
+
+# -----------------------------
+# Safe command wrapper with failover and merging
+# -----------------------------
+
 def safe_redis_command(cmd, *args, **kwargs):
     global r, r_master, r_backup
     if not r:
         return None
-
     old_r = r
     try:
         return getattr(r, cmd)(*args, **kwargs)
     except Exception as e:
-        print(f"Redis command failed on current host: {e}")
-        candidates = [c for c in [r_master, r_backup] if c and c != r]
+        print(f'Redis command {cmd} failed on {getattr(old_r, "connection_pool", None)}: {e}')
+        candidates = [c for c in (r_master, r_backup) if c and c != r]
         for candidate in candidates:
             try:
                 candidate.ping()
                 r = candidate
-                if r == r_master and old_r == r_backup:
-                    merge_state(old_r, r)
-                    socketio.emit('force_sync')
-                print(f"--- 🚨 FAILOVER SUCCESS: Switched active Redis to {r.connection_pool.connection_kwargs.get('host','UNKNOWN')}")
+                # If we switched to master from backup => reconcile BACKUP -> MASTER
+                try:
+                    if r == r_master and r_backup:
+                        mlen = list_len(r_master, STATE_KEY)
+                        blen = list_len(r_backup, STATE_KEY)
+                        # If master empty but backup has data, copy full state
+                        if mlen == 0 and blen > 0:
+                            copied = copy_full_state(r_backup, r_master)
+                            print(f'Copied {copied} items BACKUP -> MASTER')
+                        # If backup has more items than master, merge missing
+                        elif blen > mlen:
+                            merged = merge_missing(r_backup, r_master)
+                            if merged:
+                                print(f'Merged {merged} missing items BACKUP -> MASTER')
+                        try:
+                            socketio.emit('force_sync', broadcast=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # If we switched to backup from master => reconcile MASTER -> BACKUP
+                try:
+                    if r == r_backup and r_master:
+                        blen = list_len(r_backup, STATE_KEY)
+                        mlen = list_len(r_master, STATE_KEY)
+                        if blen == 0 and mlen > 0:
+                            copied = copy_full_state(r_master, r_backup)
+                            print(f'Copied {copied} items MASTER -> BACKUP')
+                        elif mlen > blen:
+                            merged = merge_missing(r_master, r_backup)
+                            if merged:
+                                print(f'Merged {merged} missing items MASTER -> BACKUP')
+                        try:
+                            socketio.emit('force_sync', broadcast=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # retry original command on new active client
                 return getattr(r, cmd)(*args, **kwargs)
             except Exception:
                 continue
-        print("Redis command failed on all hosts. Skipping...")
+        print('Redis command failed on all hosts.')
         return None
 
-# --- State ---
+# -----------------------------
+# Application state helpers
+# -----------------------------
+
 def save_state(data):
     safe_redis_command('rpush', STATE_KEY, json.dumps(data))
+
 
 def load_state():
     items = safe_redis_command('lrange', STATE_KEY, 0, -1)
@@ -91,12 +166,14 @@ def load_state():
         return [json.loads(x) for x in items]
     return []
 
-# --- Routes ---
+# -----------------------------
+# Flask routes / socket handlers
+# -----------------------------
+
 @app.route('/')
 def index():
     return render_template('index.html')
 
-# --- SocketIO Handlers ---
 @socketio.on('connect')
 def handle_connect():
     state = load_state()
@@ -110,32 +187,85 @@ def handle_draw(data):
         safe_redis_command('delete', STATE_KEY)
     else:
         save_state(data)
-    safe_redis_command('publish', 'whiteboard_channel', json.dumps(data))
+    safe_redis_command('publish', CHANNEL, json.dumps(data))
 
 @socketio.on('clear_all')
 def handle_clear_all():
     safe_redis_command('delete', STATE_KEY)
     clear_msg = json.dumps({'action': 'clear_all'})
-    safe_redis_command('publish', 'whiteboard_channel', clear_msg)
+    safe_redis_command('publish', CHANNEL, clear_msg)
     emit('clear_all', broadcast=True)
 
-# --- Redis Listener ---
+# Allow clients to request a fresh sync explicitly
+@socketio.on('request_sync')
+def handle_request_sync():
+    state = load_state()
+    emit('sync_state', state)
+
+# -----------------------------
+# Redis listener with proactive reconciliation
+# -----------------------------
+
 def redis_listener():
     global r, r_master, r_backup
+    last_active = None
     while True:
+        # ensure we have an active client
         if not r:
             r_master = connect_redis(MASTER_HOST)
             r_backup = connect_redis(BACKUP_HOST)
             r = r_master or r_backup
-            if r:
-                socketio.emit('force_sync')
-            else:
+            if not r:
                 time.sleep(2)
                 continue
+
+        # if active changed since last loop, run reconciliation
         try:
+            current_active = r
+            if last_active is not None and last_active != current_active:
+                try:
+                    # If we switched to master, ensure master has backup data
+                    if current_active == r_master and r_backup:
+                        mlen = list_len(r_master, STATE_KEY)
+                        blen = list_len(r_backup, STATE_KEY)
+                        if blen > mlen:
+                            # prefer full copy if master empty
+                            if mlen == 0:
+                                copied = copy_full_state(r_backup, r_master)
+                                print(f'Reconciled: copied {copied} items BACKUP -> MASTER')
+                            else:
+                                merged = merge_missing(r_backup, r_master)
+                                if merged:
+                                    print(f'Reconciled: merged {merged} items BACKUP -> MASTER')
+                            try:
+                                socketio.emit('force_sync', broadcast=True)
+                            except Exception:
+                                pass
+                    # If we switched to backup, ensure backup has master data
+                    if current_active == r_backup and r_master:
+                        blen = list_len(r_backup, STATE_KEY)
+                        mlen = list_len(r_master, STATE_KEY)
+                        if mlen > blen:
+                            if blen == 0:
+                                copied = copy_full_state(r_master, r_backup)
+                                print(f'Reconciled: copied {copied} items MASTER -> BACKUP')
+                            else:
+                                merged = merge_missing(r_master, r_backup)
+                                if merged:
+                                    print(f'Reconciled: merged {merged} items MASTER -> BACKUP')
+                            try:
+                                socketio.emit('force_sync', broadcast=True)
+                            except Exception:
+                                pass
+                except Exception as e:
+                    print('Error during proactive reconciliation:', e)
+            last_active = current_active
+
+            # create pubsub on current client and listen
             pubsub = r.pubsub()
-            pubsub.subscribe('whiteboard_channel')
-            print("Redis listener started...")
+            pubsub.subscribe(CHANNEL)
+            print('Redis listener started on', r.connection_pool.connection_kwargs.get('host'))
+
             for msg in pubsub.listen():
                 if msg['type'] != 'message':
                     continue
@@ -144,20 +274,24 @@ def redis_listener():
                 except Exception:
                     continue
                 if data.get('action') == 'clear_all':
-                    socketio.emit('clear_all')
+                    socketio.emit('clear_all', broadcast=True)
                 else:
-                    socketio.emit('draw', data)
+                    socketio.emit('draw', data, broadcast=True)
         except Exception as e:
-            print(f"Redis listener error: {e}. Retrying...")
+            print('Redis listener error (will retry):', e)
+            # drop active client to force reconnect and reconciliation
             r = None
             time.sleep(2)
 
-# --- Start server ---
-if __name__ == "__main__":
-    print("Starting server...")
+# -----------------------------
+# Start server
+# -----------------------------
+
+if __name__ == '__main__':
+    print('Starting server...')
     socketio.start_background_task(redis_listener)
     port = int(os.environ.get('PORT', 5001))
-    socketio.run(app, host="0.0.0.0", port=port)
+    socketio.run(app, host='0.0.0.0', port=port)
 import eventlet
 # Must monkey_patch early for SocketIO with Eventlet
 eventlet.monkey_patch()
