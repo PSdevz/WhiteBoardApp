@@ -18,12 +18,10 @@
     const canvas = document.getElementById('board');
     const ctx = canvas.getContext('2d');
     let currentState = [];
-    let segmentSet = new Set(); // To prevent duplicates
 
     // --- Utility Functions ---
     function clearCanvas() {
         currentState = [];
-        segmentSet.clear();
         ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
 
@@ -54,11 +52,7 @@
     let drawing = false;
     let lastX = 0, lastY = 0;
 
-    canvas.addEventListener('mousedown', e => {
-        drawing = true;
-        lastX = e.clientX;
-        lastY = e.clientY;
-    });
+    canvas.addEventListener('mousedown', e => { drawing = true; lastX = e.clientX; lastY = e.clientY; });
     canvas.addEventListener('mouseup', () => drawing = false);
     canvas.addEventListener('mouseout', () => drawing = false);
     canvas.addEventListener('mousemove', draw);
@@ -67,23 +61,16 @@
         if (!drawing) return;
         const x = event.clientX;
         const y = event.clientY;
-        const key = `${lastX},${lastY},${x},${y}`;
-        if (segmentSet.has(key)) return;
-
         const data = { x, y, lastX, lastY };
         currentState.push(data);
-        segmentSet.add(key);
-
         ctx.beginPath();
         ctx.moveTo(lastX, lastY);
         ctx.lineTo(x, y);
         ctx.strokeStyle = 'black';
         ctx.lineWidth = 2;
         ctx.stroke();
-
         lastX = x;
         lastY = y;
-
         socket.emit('draw', data);
     }
 
@@ -97,15 +84,11 @@
     // --- Socket.IO Listeners ---
     socket.on('connect', () => {
         console.log('Connected to server');
-        socket.emit('request_sync');
+        socket.emit('request_sync'); // critical to restore drawings on refresh
     });
 
     socket.on('draw', data => {
-        const key = `${data.lastX},${data.lastY},${data.x},${data.y}`;
-        if (segmentSet.has(key)) return;
         currentState.push(data);
-        segmentSet.add(key);
-
         ctx.beginPath();
         ctx.moveTo(data.lastX, data.lastY);
         ctx.lineTo(data.x, data.y);
@@ -120,15 +103,7 @@
     });
 
     socket.on('sync_state', state => {
-        console.log(`Received state with ${state.length} items`);
-        clearCanvas();
-        state.forEach(data => {
-            const key = `${data.lastX},${data.lastY},${data.x},${data.y}`;
-            if (!segmentSet.has(key)) {
-                currentState.push(data);
-                segmentSet.add(key);
-            }
-        });
+        currentState = state;
         redrawState();
     });
 
