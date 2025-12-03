@@ -13,7 +13,7 @@ app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 # --- Redis Setup (Automatic Master → Backup Failover) ---
 
 MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
-BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.51")
+BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 
 def connect_to_redis():
