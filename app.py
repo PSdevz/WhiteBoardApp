@@ -15,6 +15,7 @@ app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
 BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+IS_MASTER = os.environ.get("IS_MASTER", "true").lower() == "true"
 
 def connect_to_redis(host):
     """Connect to Redis at specified host."""
@@ -22,19 +23,29 @@ def connect_to_redis(host):
     client.ping()
     return client
 
-try:
-    r_master = connect_to_redis(MASTER_HOST)
-    print(f"Connected to MASTER Redis at {MASTER_HOST}")
-except Exception as e:
-    print(f"MASTER Redis unavailable at startup: {e}")
-    r_master = None
+r_master = None
+r_backup = None
 
-try:
-    r_backup = connect_to_redis(BACKUP_HOST)
-    print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
-except Exception as e:
-    print(f"BACKUP Redis unavailable at startup: {e}")
-    r_backup = None
+if IS_MASTER:
+    try:
+        r_master = connect_to_redis(MASTER_HOST)
+        print(f"Connected to MASTER Redis at {MASTER_HOST}")
+    except Exception as e:
+        print(f"MASTER Redis unavailable at startup: {e}")
+else:
+    try:
+        r_master = connect_to_redis(MASTER_HOST)
+        print(f"Connected to MASTER Redis at {MASTER_HOST}")
+    except Exception as e:
+        print(f"MASTER Redis unavailable at startup: {e}")
+        r_master = None
+
+    try:
+        r_backup = connect_to_redis(BACKUP_HOST)
+        print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
+    except Exception as e:
+        print(f"BACKUP Redis unavailable at startup: {e}")
+        r_backup = None
 
 if not r_master and not r_backup:
     print("❌ No Redis server available — running without Redis.")
