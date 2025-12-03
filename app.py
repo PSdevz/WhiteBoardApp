@@ -114,6 +114,30 @@ def safe_redis_command(cmd, *args, **kwargs):
 
                 # --- FAILLOVER/FAILBACK DETECTED ---
                 r = candidate
+
+                # --- Ensure full bidirectional synchronization ---
+                try:
+                    if r == r_master and r_backup:
+                        # Master is now active → overwrite backup fully
+                        state = r_master.lrange(STATE_KEY, 0, -1) or []
+                        pipe = r_backup.pipeline()
+                        pipe.delete(STATE_KEY)
+                        if state:
+                            pipe.rpush(STATE_KEY, *state)
+                        pipe.execute()
+                        print("### FULL SYNC: MASTER → BACKUP ###")
+                    elif r == r_backup and r_master:
+                        # Backup is now active → overwrite master fully
+                        state = r_backup.lrange(STATE_KEY, 0, -1) or []
+                        pipe = r_master.pipeline()
+                        pipe.delete(STATE_KEY)
+                        if state:
+                            pipe.rpush(STATE_KEY, *state)
+                        pipe.execute()
+                        print("### FULL SYNC: BACKUP → MASTER ###")
+                except Exception as e:
+                    print(f"Bidirectional sync error: {e}")
+
                 active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
 
                 print(f"--- 🚨 FAILLOVER SUCCESS: Switched active Redis to {active_host_ip}")
