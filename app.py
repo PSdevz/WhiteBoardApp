@@ -175,10 +175,10 @@ def redis_listener():
                 active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
                 print(f"Reconnected to Redis at {active_host_ip}")
 
-                # FIX 2: Trigger a client-side sync after reconnection/failback
-                if not r_was_none:
-                    # Broadcast to all clients that they need to re-fetch the state
-                    socketio.emit('force_sync')
+                # Don't force a client sync just because Redis reconnected.
+                # We will only force a sync after an actual state reconciliation (copy/merge)
+                # which is handled in the failover code paths where we modify the state.
+
             else:
                 time.sleep(2)
                 continue
@@ -200,9 +200,9 @@ def redis_listener():
                     # Fan out the Pub/Sub message to all connected SocketIO clients
                     if data.get('action') == 'clear_all':
                         # Use skip_sid=request.sid for the original draw handler, but here we must emit to all
-                        socketio.emit('clear_all')
+                        socketio.emit('clear_all', broadcast=True)
                     else:
-                        socketio.emit('draw', data)
+                        socketio.emit('draw', data, broadcast=True)
 
         # If the Pub/Sub connection drops (e.g., Redis server goes down)
         except Exception as e:
