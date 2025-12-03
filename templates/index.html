@@ -38,7 +38,15 @@
     const ctx = canvas.getContext('2d');
     let currentState = [];
 
-    // Set and resize canvas
+    // --- Utility Functions ---
+
+    // Clears the canvas and local state array
+    function clearCanvas() {
+        currentState = [];
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Sets canvas size and re-renders the current state
     function resizeCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
@@ -47,10 +55,7 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // Connect to Socket.IO server
-    const socket = io(window.location.origin, { transports: ["websocket", "polling"] });
-
-    // Redraw all drawing actions
+    // Redraw all drawing actions from the currentState array
     function redrawState() {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         currentState.forEach(data => {
@@ -63,7 +68,10 @@
         });
     }
 
-    // Drawing logic
+    // --- Socket.IO Setup ---
+    const socket = io(window.location.origin, { transports: ["websocket", "polling"] });
+
+    // --- Drawing Logic ---
     let drawing = false;
     let lastX = 0, lastY = 0;
 
@@ -102,12 +110,21 @@
     // Clear All button
     const clearBtn = document.getElementById('clearBtn');
     clearBtn.addEventListener('click', () => {
-        currentState = [];
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        clearCanvas();
         socket.emit('clear_all');
     });
 
-    // Socket.IO listeners
+    // --- Socket.IO Listeners (Updated) ---
+
+    // Handler for successful connection
+    socket.on('connect', () => {
+        console.log('Connected to server. Ready to receive state sync.');
+        // Clear the canvas upon connection to prevent duplicate drawings
+        // when 'sync_state' arrives.
+        clearCanvas();
+    });
+
+    // Handler for incoming draw events from other clients/server pubsub
     socket.on('draw', data => {
         currentState.push(data);
         ctx.beginPath();
@@ -118,14 +135,28 @@
         ctx.stroke();
     });
 
+    // Handler for initial state synchronization (sent upon 'connect')
     socket.on('sync_state', state => {
+        console.log(`Received initial state sync with ${state.length} segments.`);
         currentState = state;
         redrawState();
     });
 
+    // Handler for full board clear (sent by clear button or server pubsub)
     socket.on('clear_all', () => {
-        currentState = [];
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        clearCanvas();
+        console.log('Board cleared by another client/server event.');
+    });
+
+    // 💥 NEW: Handler for Server Failover/Failback Notification
+    socket.on('force_sync', () => {
+        console.log('--- 🚨 SERVER FAILOVER DETECTED: Forcing full state refresh ---');
+
+        // Disconnecting and reconnecting forces the server to re-run
+        // the 'connect' handler, which in turn calls load_state()
+        // from the newly failed-over Redis and emits 'sync_state'.
+        socket.disconnect();
+        socket.connect();
     });
 </script>
 </body>
