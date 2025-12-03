@@ -17,14 +17,19 @@ BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 
 def connect_redis(host):
+    """Attempts connection to Redis at specified host."""
     try:
+        # Use decode_responses=True for easy string handling
         client = redis.StrictRedis(host=host, port=REDIS_PORT, decode_responses=True)
         client.ping()
         return client
-    except:
+    except Exception as e:
+        # Log connection failure detail only for the initial connection attempt
+        if os.environ.get('LOG_LEVEL') == 'DEBUG':
+            print(f"DEBUG: Could not connect to Redis at {host}:{REDIS_PORT}. Error: {e}")
         return None
 
-# Try connecting to master, then backup
+# Try connecting to master, then backup at startup
 r_master = connect_redis(MASTER_HOST)
 r_backup = connect_redis(BACKUP_HOST)
 
@@ -43,22 +48,39 @@ STATE_KEY = "whiteboard_state"
 
 # --- Safe Redis commands with automatic failover ---
 def safe_redis_command(cmd, *args, **kwargs):
+    """
+    Executes a Redis command with automatic failover to the other host on failure.
+    """
     global r, r_master, r_backup
     if not r:
         return None
     try:
+        # Try current client
         return getattr(r, cmd)(*args, **kwargs)
-    except:
-        # Try switching to the other Redis if current fails
-        for candidate in [r_master, r_backup]:
-            if candidate and candidate != r:
-                try:
-                    candidate.ping()
-                    r = candidate
-                    print(f"Switched Redis client to {r}")
-                    return getattr(r, cmd)(*args, **kwargs)
-                except:
-                    continue
+    except Exception as current_error:
+        # Current client failed. Try switching.
+        print(f"Redis command failed on current active host. Error: {current_error}")
+
+        # Order candidates so we try the inactive client first.
+        candidates = [c for c in [r_master, r_backup] if c and c != r]
+
+        for candidate in candidates:
+            try:
+                candidate.ping()
+                # Successfully pinged the alternate host. Perform switch.
+                r = candidate
+                active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
+
+                # --- CRITICAL LOGGING FOR DEMONSTRATION ---
+                print(f"--- 🚨 FAILLOVER SUCCESS: Switched active Redis to {active_host_ip}")
+
+                # Retry command on the new active client
+                return getattr(r, cmd)(*args, **kwargs)
+            except:
+                continue
+
+        # If the command failed on all attempts
+        print(f"Redis command failed on all hosts. State saving suspended.")
         return None
 
 # --- State ---
@@ -90,6 +112,7 @@ def handle_draw(data):
         safe_redis_command('delete', STATE_KEY)
     else:
         save_state(data)
+    # The publish is essential for cross-node synchronization
     safe_redis_command('publish', 'whiteboard_channel', json.dumps(data))
 
 @socketio.on('clear_all')
@@ -103,13 +126,15 @@ def handle_clear_all():
 def redis_listener():
     global r
     while True:
+        # Check if we need to establish an initial connection or reconnect
         if not r:
             print("Waiting for Redis to become available...")
             r_master_try = connect_redis(MASTER_HOST)
             r_backup_try = connect_redis(BACKUP_HOST)
             r = r_master_try or r_backup_try
             if r:
-                print(f"Reconnected to Redis at {r}")
+                active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
+                print(f"Reconnected to Redis at {active_host_ip}")
             else:
                 time.sleep(2)
                 continue
@@ -118,20 +143,25 @@ def redis_listener():
             pubsub = r.pubsub()
             pubsub.subscribe('whiteboard_channel')
             print("Redis listener started...")
+
+            # This loop runs while the Pub/Sub connection is alive
             for msg in pubsub.listen():
                 if msg['type'] == 'message':
                     try:
                         data = json.loads(msg['data'])
                     except Exception:
-                        continue
+                        continue # Ignore non-JSON messages
+
                     if data.get('action') == 'clear_all':
                         socketio.emit('clear_all')
                     else:
                         socketio.emit('draw', data)
+
+        # If the Pub/Sub connection drops (e.g., Redis server goes down)
         except Exception as e:
-            print(f"Redis listener error: {e}")
+            print(f"Redis listener error (connection dropped): {e}. Attempting full reconnect.")
             r = None
-            time.sleep(2)
+            time.sleep(2) # Wait before attempting reconnection cycle
 
 # --- Start server ---
 if __name__ == "__main__":
