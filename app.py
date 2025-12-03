@@ -11,99 +11,68 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
 # --- Redis Setup (Automatic Master → Backup Failover) ---
-
 MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
 BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-IS_MASTER = os.environ.get("IS_MASTER", "true").lower() == "true"
 
 def connect_to_redis(host):
-    """Connect to Redis at specified host."""
     client = redis.StrictRedis(host=host, port=REDIS_PORT, decode_responses=True)
     client.ping()
     return client
 
+# Always try to connect to both
 r_master = None
 r_backup = None
 
-if IS_MASTER:
-    try:
-        r_master = connect_to_redis(MASTER_HOST)
-        print(f"Connected to MASTER Redis at {MASTER_HOST}")
-    except Exception as e:
-        print(f"MASTER Redis unavailable at startup: {e}")
-else:
-    try:
-        r_master = connect_to_redis(MASTER_HOST)
-        print(f"Connected to MASTER Redis at {MASTER_HOST}")
-    except Exception as e:
-        print(f"MASTER Redis unavailable at startup: {e}")
-        r_master = None
+try:
+    r_master = connect_to_redis(MASTER_HOST)
+    print(f"Connected to MASTER Redis at {MASTER_HOST}")
+except Exception as e:
+    print(f"MASTER Redis unavailable at startup: {e}")
+    r_master = None
 
-    try:
-        r_backup = connect_to_redis(BACKUP_HOST)
-        print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
-    except Exception as e:
-        print(f"BACKUP Redis unavailable at startup: {e}")
-        r_backup = None
+try:
+    r_backup = connect_to_redis(BACKUP_HOST)
+    print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
+except Exception as e:
+    print(f"BACKUP Redis unavailable at startup: {e}")
+    r_backup = None
 
 if not r_master and not r_backup:
     print("❌ No Redis server available — running without Redis.")
 
-# Use master as primary client reference if available, else backup
+# Use master first if available, else backup
 r = r_master if r_master else r_backup
 
 def safe_redis_command(command, *args, **kwargs):
-    """
-    Attempt to run a Redis command on master first.
-    On failure, switch to backup and retry once.
-    Also attempts automatic fail-back to master if it becomes available.
-    """
     global r, r_master, r_backup
 
-    if not r_master and not r_backup:
-        # No redis available
-        return None
-
-    # Attempt automatic fail-back to master if currently not using master
+    # Attempt fail-back to master if possible
     if r_master and r != r_master:
         try:
-            # Test master connection
             r_master.ping()
             r = r_master
-            # print("Switched back to MASTER Redis")
         except Exception:
-            # Master still unavailable, continue using current client
             pass
 
-    clients = []
-    # Attempt command on the current primary client first
+    # Try command on current primary first, then fallback clients
+    clients = [c for c in (r, r_master, r_backup) if c and c not in [None, r]]
     if r:
-        clients.append(r)
-    # Add the other client if different
-    if r_master and r_master != r:
-        clients.append(r_master)
-    if r_backup and r_backup != r and r_backup not in clients:
-        clients.append(r_backup)
+        clients.insert(0, r)
 
     for client in clients:
         try:
             result = getattr(client, command)(*args, **kwargs)
-            # Update global 'r' to this client if different
             if r != client:
                 r = client
             return result
-        except Exception as e:
-            # print(f"Redis {command} error on {client}: {e}")
+        except Exception:
             continue
 
-    # If all attempts failed
-    print(f"Redis {command} command failed on both master and backup.")
+    print(f"Redis {command} failed on all clients.")
     return None
 
 socketio = SocketIO(app, cors_allowed_origins="*")
-
-# --- State Snapshot ---
 STATE_KEY = "whiteboard_state"
 
 def save_state(data):
@@ -121,12 +90,10 @@ def load_state():
         print(f"Redis load_state error: {e}")
     return []
 
-# --- Routes ---
 @app.route('/')
 def index():
     return render_template('index.html')
 
-# --- SocketIO Handlers ---
 @socketio.on('connect')
 def handle_connect():
     state = load_state()
@@ -135,13 +102,11 @@ def handle_connect():
 
 @socketio.on('draw')
 def handle_draw(data):
-    # Broadcast locally
     emit('draw', data, broadcast=True)
     try:
         safe_redis_command('publish', 'whiteboard_channel', json.dumps(data))
-        # Handle clear action
         if data.get('action') == 'clear':
-            safe_redis_command('delete', STATE_KEY)  # clear saved state
+            safe_redis_command('delete', STATE_KEY)
         else:
             save_state(data)
     except Exception as e:
@@ -150,14 +115,13 @@ def handle_draw(data):
 @socketio.on('clear_all')
 def handle_clear_all():
     try:
-        safe_redis_command('delete', STATE_KEY)  # clear saved state
+        safe_redis_command('delete', STATE_KEY)
         clear_msg = json.dumps({'action': 'clear_all'})
         safe_redis_command('publish', 'whiteboard_channel', clear_msg)
         emit('clear_all', broadcast=True)
     except Exception as e:
         print(f"Redis clear_all error: {e}")
 
-# --- Redis Listener ---
 def redis_listener():
     if not r:
         print("Not starting redis_listener (Redis not connected).")
@@ -173,7 +137,6 @@ def redis_listener():
             else:
                 socketio.emit('draw', data)
 
-# --- Start App ---
 if __name__ == "__main__":
     print("Starting server...")
     if r:
