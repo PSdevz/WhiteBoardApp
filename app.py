@@ -10,16 +10,35 @@ import os
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
-# --- Redis Setup ---
-redis_host = os.environ.get('REDIS_HOST', 'localhost')
-redis_port = int(os.environ.get('REDIS_PORT', 6379))
-try:
-    r = redis.StrictRedis(host=redis_host, port=redis_port, decode_responses=True)
-    r.ping()
-    print("Connected to Redis successfully!")
-except Exception as e:
-    print(f"COULD NOT CONNECT TO REDIS at {redis_host}:{redis_port}: {e}")
-    r = None
+# --- Redis Setup (Automatic Master → Backup Failover) ---
+
+MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
+BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.51")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+
+def connect_to_redis():
+    """Attempt connection to MASTER first; fallback to BACKUP if needed."""
+    try:
+        client = redis.StrictRedis(host=MASTER_HOST, port=REDIS_PORT, decode_responses=True)
+        client.ping()
+        print(f"Connected to MASTER Redis at {MASTER_HOST}")
+        return client
+    except Exception as e:
+        print(f"MASTER Redis unavailable: {e}")
+        print("Trying BACKUP Redis...")
+
+    try:
+        client = redis.StrictRedis(host=BACKUP_HOST, port=REDIS_PORT, decode_responses=True)
+        client.ping()
+        print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
+        return client
+    except Exception as e:
+        print(f"BACKUP Redis unavailable: {e}")
+
+    print("❌ No Redis server available — running without Redis.")
+    return None
+
+r = connect_to_redis()
 
 socketio = SocketIO(app, cors_allowed_origins="*")
 
