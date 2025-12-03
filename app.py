@@ -11,7 +11,7 @@ import time
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
-# --- Redis Setup (Automatic Master → Backup Failover) ---
+# --- Redis Setup (Master → Backup Failover) ---
 MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
 BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
@@ -41,7 +41,7 @@ else:
 socketio = SocketIO(app, cors_allowed_origins="*")
 STATE_KEY = "whiteboard_state"
 
-# --- Safe Redis commands with failover ---
+# --- Safe Redis commands with automatic failover ---
 def safe_redis_command(cmd, *args, **kwargs):
     global r, r_master, r_backup
     if not r:
@@ -50,15 +50,15 @@ def safe_redis_command(cmd, *args, **kwargs):
         return getattr(r, cmd)(*args, **kwargs)
     except:
         # Try switching to the other Redis if current fails
-        other = r_backup if r == r_master else r_master
-        if other:
-            try:
-                other.ping()
-                r = other
-                print(f"Switched Redis client to {r}")
-                return getattr(r, cmd)(*args, **kwargs)
-            except:
-                return None
+        for candidate in [r_master, r_backup]:
+            if candidate and candidate != r:
+                try:
+                    candidate.ping()
+                    r = candidate
+                    print(f"Switched Redis client to {r}")
+                    return getattr(r, cmd)(*args, **kwargs)
+                except:
+                    continue
         return None
 
 # --- State ---
@@ -99,13 +99,12 @@ def handle_clear_all():
     safe_redis_command('publish', 'whiteboard_channel', clear_msg)
     emit('clear_all', broadcast=True)
 
-# --- Redis listener with automatic failover ---
+# --- Redis Listener (always active, auto-reconnect) ---
 def redis_listener():
     global r
     while True:
         if not r:
             print("Waiting for Redis to become available...")
-            # Try reconnecting to master first, then backup
             r_master_try = connect_redis(MASTER_HOST)
             r_backup_try = connect_redis(BACKUP_HOST)
             r = r_master_try or r_backup_try
@@ -121,7 +120,10 @@ def redis_listener():
             print("Redis listener started...")
             for msg in pubsub.listen():
                 if msg['type'] == 'message':
-                    data = json.loads(msg['data'])
+                    try:
+                        data = json.loads(msg['data'])
+                    except Exception:
+                        continue
                     if data.get('action') == 'clear_all':
                         socketio.emit('clear_all')
                     else:
@@ -129,7 +131,7 @@ def redis_listener():
         except Exception as e:
             print(f"Redis listener error: {e}")
             r = None
-            time.sleep(2)  # retry after delay
+            time.sleep(2)
 
 # --- Start server ---
 if __name__ == "__main__":
