@@ -1,4 +1,5 @@
 import eventlet
+# Must monkey_patch early for SocketIO with Eventlet
 eventlet.monkey_patch()
 
 from flask import Flask, render_template
@@ -9,6 +10,7 @@ import os
 import time
 
 app = Flask(__name__)
+# IMPORTANT: Change this in a production environment
 app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
 # --- Redis Setup (Master → Backup Failover) ---
@@ -51,7 +53,7 @@ else:
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ----------------------------------------------------------------------
-# --- NEW: State Synchronization Function ---
+# --- State Synchronization Function (Executed during failback) ---
 # ----------------------------------------------------------------------
 def sync_state_on_failback():
     """
@@ -62,7 +64,7 @@ def sync_state_on_failback():
 
     # Only run this logic if the Master is the currently active client
     if r != r_master or not r_backup:
-        return
+        return False
 
     try:
         # Check if Master is empty AND Backup has data
@@ -114,7 +116,6 @@ def safe_redis_command(cmd, *args, **kwargs):
                 r = candidate
                 active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
 
-                # We don't need sync logic here anymore, just the switch
                 print(f"--- 🚨 FAILLOVER SUCCESS: Switched active Redis to {active_host_ip}")
 
                 # Retry command on the new active client
@@ -136,7 +137,7 @@ def load_state():
         return [json.loads(x) for x in items]
     return []
 
-# --- Routes and SocketIO Handlers remain the same ---
+# --- Routes and SocketIO Handlers ---
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -164,7 +165,7 @@ def handle_clear_all():
     emit('clear_all', broadcast=True)
 
 # ----------------------------------------------------------------------
-# --- Updated Redis Listener ---
+# --- Updated Redis Listener (Handles reconnection, sync, and client notification) ---
 # ----------------------------------------------------------------------
 def redis_listener():
     global r, r_master, r_backup
@@ -184,25 +185,29 @@ def redis_listener():
 
             if new_r:
                 # We have successfully reconnected to a server
+
+                # Check for failback *before* updating r
                 is_failback_to_master = (r == r_backup and new_r == r_master_try)
 
-                r_master = r_master_try # Update master/backup globals
+                # Update global client references
+                r_master = r_master_try
                 r_backup = r_backup_try
                 r = new_r
 
                 active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
                 print(f"Reconnected to Redis at {active_host_ip}")
 
-                # 1. NEW: Execute state synchronization immediately upon failback to Master
+                # 1. Execute state synchronization immediately upon failback to Master
                 sync_occurred = False
                 if is_failback_to_master:
                     sync_occurred = sync_state_on_failback()
 
                 # 2. Trigger client-side sync
                 if not r_was_none or sync_occurred:
-                    # Use a slight delay before triggering sync to give Redis time
-                    # to finish the state copy and become fully stable.
-                    eventlet.sleep(0.5)
+                    # Added delay to 1.0 second for maximum robustness of the state copy operation
+                    print("Delaying 'force_sync' broadcast for 1.0s to ensure state copy is complete...")
+                    eventlet.sleep(1.0)
+
                     print("Broadcasting 'force_sync' to clients...")
                     socketio.emit('force_sync')
             else:
@@ -231,7 +236,7 @@ def redis_listener():
             r = None
             time.sleep(2)
 
-        # --- Start server ---
+# --- Start server ---
 if __name__ == "__main__":
     print("Starting server...")
     socketio.start_background_task(redis_listener)
