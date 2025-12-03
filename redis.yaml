@@ -1,39 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: redis-server
+  name: redis-master
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: redis
+      role: master
   template:
     metadata:
       labels:
         app: redis
+        role: master
     spec:
       containers:
         - name: redis
-          image: redis:alpine
+          image: redis:7-alpine
           ports:
             - containerPort: 6379
           volumeMounts:
             - name: redis-data
               mountPath: /data
-          livenessProbe:
-            tcpSocket:
-              port: 6379
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            tcpSocket:
-              port: 6379
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+          command: ["redis-server", "--appendonly", "yes", "--protected-mode", "no"]
           resources:
             requests:
               memory: "256Mi"
@@ -44,13 +33,70 @@ spec:
       volumes:
         - name: redis-data
           persistentVolumeClaim:
-            claimName: redis-pvc
+            claimName: redis-master-pvc
 
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: redis-pvc
+  name: redis-master-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-replica
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: replica
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+          command:
+            - redis-server
+            - "--slaveof"
+            - "redis-master 6379"
+            - "--appendonly"
+            - "yes"
+            - "--protected-mode"
+            - "no"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-replica-pvc
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-replica-pvc
 spec:
   accessModes:
     - ReadWriteOnce
@@ -62,12 +108,25 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: redis-server   # must match what your app uses as redis_host
+  name: redis-master
 spec:
-  type: NodePort       # or LoadBalancer if you’re on cloud
+  selector:
+    app: redis
+    role: master
   ports:
     - port: 6379
       targetPort: 6379
-      nodePort: 32005  # optional: fix the external port if you want consistency
+  type: NodePort
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-replica
+spec:
   selector:
     app: redis
+    role: replica
+  ports:
+    - port: 6379
+      targetPort: 6379
+  type: NodePort
