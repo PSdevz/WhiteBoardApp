@@ -1,40 +1,42 @@
+import eventlet
+# Must monkey_patch early for SocketIO with Eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 import redis
 import json
 import os
 import time
-import threading
 
 app = Flask(__name__)
+# IMPORTANT: Change this in a production environment
 app.config['SECRET_KEY'] = 'a-very-secret-key-change-this'
 
-# --- Redis Setup ---
+# --- Redis Setup (Master → Backup Failover) ---
 MASTER_HOST = os.environ.get("REDIS_MASTER", "192.168.64.5")
 BACKUP_HOST = os.environ.get("REDIS_BACKUP", "192.168.64.16")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 STATE_KEY = "whiteboard_state"
 
-# Use threading backend instead of eventlet
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
-
-# Global redis objects
+# Global variables
 r_master = None
 r_backup = None
-r = None  # active redis client
-
+r = None # Currently active client
 
 def connect_redis(host):
-    """Try connecting to Redis."""
+    """Attempts connection to Redis at specified host."""
     try:
+        # Use decode_responses=True for easy string handling
         client = redis.StrictRedis(host=host, port=REDIS_PORT, decode_responses=True)
         client.ping()
         return client
-    except:
+    except Exception as e:
+        if os.environ.get('LOG_LEVEL') == 'DEBUG':
+            print(f"DEBUG: Could not connect to Redis at {host}:{REDIS_PORT}. Error: {e}")
         return None
 
-
-# Initial connections
+# Initial connection attempts
 r_master = connect_redis(MASTER_HOST)
 r_backup = connect_redis(BACKUP_HOST)
 
@@ -45,75 +47,113 @@ elif r_backup:
     print(f"Connected to BACKUP Redis at {BACKUP_HOST}")
     r = r_backup
 else:
-    print("❌ No Redis server available — running WITHOUT Redis")
+    print("❌ No Redis server available — running without Redis")
     r = None
 
+socketio = SocketIO(app, cors_allowed_origins="*")
 
-# -------------------------------------------------------------------
-#   FULL STATE SYNC HELPERS
-# -------------------------------------------------------------------
-def copy_state(source, target):
-    """Copy all whiteboard state from source Redis to target Redis."""
-    try:
-        state = source.lrange(STATE_KEY, 0, -1) or []
-        pipe = target.pipeline()
-        pipe.delete(STATE_KEY)
-        if state:
-            pipe.rpush(STATE_KEY, *state)
-        pipe.execute()
-        return True
-    except Exception as e:
-        print("State copy error:", e)
+# ----------------------------------------------------------------------
+# --- State Synchronization Function (Executed during failback) ---
+# ----------------------------------------------------------------------
+def sync_state_on_failback():
+    """
+    Checks if the Master has just become active and copies state from
+    Backup if the Master is empty and the Backup has data.
+    """
+    global r, r_master, r_backup
+
+    # Only run this logic if the Master is the currently active client
+    if r != r_master or not r_backup:
         return False
 
+    try:
+        # Check if Master is empty AND Backup has data
+        if not r_master.exists(STATE_KEY) and r_backup.exists(STATE_KEY):
 
-# -------------------------------------------------------------------
-#   SAFE REDIS COMMAND WITH AUTO-FAILOVER
-# -------------------------------------------------------------------
+            # 1. Get state from the Backup (the previously active server)
+            state_to_copy = r_backup.lrange(STATE_KEY, 0, -1)
+
+            if state_to_copy:
+                # 2. Use a pipeline to set the state on the new Master atomically
+                r_pipe = r_master.pipeline()
+                r_pipe.delete(STATE_KEY) # Ensure clean start
+                r_pipe.rpush(STATE_KEY, *state_to_copy)
+                r_pipe.execute()
+                print("--- ✅ STATE SYNC SUCCESS: Copied state from Backup to newly active Master.")
+                return True
+
+    except Exception as e:
+        print(f"Error during state synchronization: {e}")
+    return False
+
+# ----------------------------------------------------------------------
+# --- Safe Redis commands with automatic failover (SIMPLIFIED) ---
+# ----------------------------------------------------------------------
 def safe_redis_command(cmd, *args, **kwargs):
+    """
+    Executes a Redis command with automatic failover to the other host on failure.
+    (Note: State sync logic is now in redis_listener for robustness.)
+    """
     global r, r_master, r_backup
     if not r:
         return None
 
     try:
+        # Try current client
         return getattr(r, cmd)(*args, **kwargs)
+    except Exception as current_error:
+        # Current client failed. Try switching.
+        print(f"Redis command failed on current active host. Error: {current_error}")
 
-    except Exception as err:
-        print("Redis command failed:", err)
-
+        # Order candidates so we try the inactive client first.
         candidates = [c for c in [r_master, r_backup] if c and c != r]
 
-        for cand in candidates:
+        for candidate in candidates:
             try:
-                cand.ping()
-                old_r = r
-                r = cand
+                candidate.ping()
 
-                # Perform full sync depending on failover direction
-                if r == r_master and r_backup:
-                    print("### FULL SYNC BACKUP → MASTER ###")
-                    copy_state(r_backup, r_master)
+                # --- FAILLOVER/FAILBACK DETECTED ---
+                r = candidate
 
-                elif r == r_backup and r_master:
-                    print("### FULL SYNC MASTER → BACKUP ###")
-                    copy_state(r_master, r_backup)
+                # --- Ensure full bidirectional synchronization ---
+                try:
+                    if r == r_master and r_backup:
+                        # Master is now active → overwrite backup fully
+                        state = r_master.lrange(STATE_KEY, 0, -1) or []
+                        pipe = r_backup.pipeline()
+                        pipe.delete(STATE_KEY)
+                        if state:
+                            pipe.rpush(STATE_KEY, *state)
+                        pipe.execute()
+                        print("### FULL SYNC: MASTER → BACKUP ###")
+                    elif r == r_backup and r_master:
+                        # Backup is now active → overwrite master fully
+                        state = r_backup.lrange(STATE_KEY, 0, -1) or []
+                        pipe = r_master.pipeline()
+                        pipe.delete(STATE_KEY)
+                        if state:
+                            pipe.rpush(STATE_KEY, *state)
+                        pipe.execute()
+                        print("### FULL SYNC: BACKUP → MASTER ###")
+                except Exception as e:
+                    print(f"Bidirectional sync error: {e}")
 
-                print("Failover → now using:", cand)
+                active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
+
+                print(f"--- 🚨 FAILLOVER SUCCESS: Switched active Redis to {active_host_ip}")
+
+                # Retry command on the new active client
                 return getattr(r, cmd)(*args, **kwargs)
-
             except:
                 continue
 
-        print("Both Redis hosts unreachable.")
+        # If the command failed on all attempts
+        print(f"Redis command failed on all hosts. State saving suspended.")
         return None
 
-
-# -------------------------------------------------------------------
-#   STATE HELPERS
-# -------------------------------------------------------------------
+# --- State ---
 def save_state(data):
     safe_redis_command('rpush', STATE_KEY, json.dumps(data))
-
 
 def load_state():
     items = safe_redis_command('lrange', STATE_KEY, 0, -1)
@@ -121,105 +161,114 @@ def load_state():
         return [json.loads(x) for x in items]
     return []
 
-
-# -------------------------------------------------------------------
-#   ROUTES
-# -------------------------------------------------------------------
+# --- Routes and SocketIO Handlers ---
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
-# -------------------------------------------------------------------
-#   SOCKET HANDLERS
-# -------------------------------------------------------------------
 @socketio.on('connect')
-def on_connect():
+def handle_connect():
     state = load_state()
     if state:
         emit('sync_state', state)
 
-
 @socketio.on('draw')
-def on_draw(data):
+def handle_draw(data):
     emit('draw', data, broadcast=True)
-
     if data.get('action') == 'clear':
         safe_redis_command('delete', STATE_KEY)
     else:
         save_state(data)
-
     safe_redis_command('publish', 'whiteboard_channel', json.dumps(data))
 
-
 @socketio.on('clear_all')
-def on_clear_all():
+def handle_clear_all():
     safe_redis_command('delete', STATE_KEY)
-    safe_redis_command('publish', 'whiteboard_channel', json.dumps({'action': 'clear_all'}))
+    clear_msg = json.dumps({'action': 'clear_all'})
+    safe_redis_command('publish', 'whiteboard_channel', clear_msg)
     emit('clear_all', broadcast=True)
 
+@socketio.on('request_sync')
+def handle_request_sync():
+    state = load_state()
+    if state:
+        emit('sync_state', state)
 
-# ---------------------------------------------------------------
-#   REDIS LISTENER THREAD
-# ---------------------------------------------------------------
+# ----------------------------------------------------------------------
+# --- Updated Redis Listener (Handles reconnection, sync, and client notification) ---
+# ----------------------------------------------------------------------
 def redis_listener():
     global r, r_master, r_backup
-
     while True:
-        try:
-            if not r:
-                # Try reconnecting
-                r_master_try = connect_redis(MASTER_HOST)
-                r_backup_try = connect_redis(BACKUP_HOST)
-                new_r = r_master_try or r_backup_try
+        # Check if we need to establish an initial connection or reconnect
+        if not r:
+            print("Waiting for Redis to become available...")
 
-                if new_r:
-                    print("Reconnected to Redis:", new_r)
-                    r_master = r_master_try
-                    r_backup = r_backup_try
-                    r = new_r
+            r_was_none = (r is None)
 
-                    # full sync on reconnect
-                    if r == r_master and r_backup:
-                        copy_state(r_backup, r_master)
-                    elif r == r_backup and r_master:
-                        copy_state(r_master, r_backup)
+            # Re-attempt connections and check if successful
+            r_master_try = connect_redis(MASTER_HOST)
+            r_backup_try = connect_redis(BACKUP_HOST)
 
+            # Determine if we have a new active connection
+            new_r = r_master_try or r_backup_try
+
+            if new_r:
+                # We have successfully reconnected to a server
+
+                # Check for failback *before* updating r
+                is_failback_to_master = (r == r_backup and new_r == r_master_try)
+
+                # Update global client references
+                r_master = r_master_try
+                r_backup = r_backup_try
+                r = new_r
+
+                active_host_ip = r.connection_pool.connection_kwargs.get('host', 'UNKNOWN')
+                print(f"Reconnected to Redis at {active_host_ip}")
+
+                # 1. Execute state synchronization immediately upon failback to Master
+                sync_occurred = False
+                if is_failback_to_master:
+                    sync_occurred = sync_state_on_failback()
+
+                # 2. Trigger client-side sync
+                if not r_was_none or sync_occurred:
+                    # Added delay to 1.0 second for maximum robustness of the state copy operation
+                    print("Delaying 'force_sync' broadcast for 1.0s to ensure state copy is complete...")
+                    eventlet.sleep(1.0)
+
+                    print("Broadcasting 'force_sync' to clients...")
                     socketio.emit('force_sync')
-
-                time.sleep(1)
+            else:
+                time.sleep(2)
                 continue
 
-            # Subscribe
+        try:
             pubsub = r.pubsub()
             pubsub.subscribe('whiteboard_channel')
-
-            print("Redis listener running...")
+            print("Redis listener started...")
 
             for msg in pubsub.listen():
-                if msg['type'] != 'message':
-                    continue
+                if msg['type'] == 'message':
+                    try:
+                        data = json.loads(msg['data'])
+                    except Exception:
+                        continue
 
-                data = json.loads(msg['data'])
-
-                if data.get('action') == 'clear_all':
-                    socketio.emit('clear_all')
-                else:
-                    socketio.emit('draw', data)
+                    if data.get('action') == 'clear_all':
+                        socketio.emit('clear_all')
+                    else:
+                        socketio.emit('draw', data)
 
         except Exception as e:
-            print("Redis listener error:", e)
+            print(f"Redis listener error (connection dropped): {e}. Attempting full reconnect.")
             r = None
-            time.sleep(1)
+            time.sleep(2)
 
-
-# Start listener thread
-threading.Thread(target=redis_listener, daemon=True).start()
-
-
-# -------------------------------------------------------------------
-#   START SERVER (THREADING MODE)
-# -------------------------------------------------------------------
+# --- Start server ---
 if __name__ == "__main__":
-    print("Starting server WITHOUT eventlet...")
-    socketio.run(app, host="0.0.0.0", port=5001, use_reloader=False)
+    print("Starting server...")
+    socketio.start_background_task(redis_listener)
+    port = int(os.environ.get('PORT', 5001))
+    socketio.run(app, host="0.0.0.0", port=port, use_reloader=False)
